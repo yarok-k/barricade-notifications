@@ -19,8 +19,11 @@ impl Ui {
         notification_store: NotificationStore,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // тестовый размер окна 200x200
-        window.set_size_request(300, -1);
-        window.set_default_size(300, -1);
+        window.set_size_request(300, 1);
+        window.set_accept_focus(false);
+        window.set_skip_taskbar_hint(true);
+        window.set_skip_pager_hint(true);
+        window.set_resizable(true);
 
         let main_container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         window.add(&main_container);
@@ -34,7 +37,7 @@ impl Ui {
         // Активные плитки по id — нужны на случай Event::Close(id)
         let mut active_tiles: HashMap<u32, NotifyWidget> = HashMap::new();
 
-        let window_rc = Rc<RefCell<window>>;
+        let win = window.clone();
         glib::timeout_add_local(Duration::from_millis(500), move || {
             // Чистим уже закрытые (кликом или таймером) плитки из локальной карты
             active_tiles.retain(|_, tile| !tile.is_dismissed());
@@ -47,7 +50,6 @@ impl Ui {
                             continue;
                         }
 
-                        // Подставьте поле иконки из вашей структуры `n`, если оно есть (например, n.icon_name)
                         let icon_name: Option<String> = None;
 
                         match NotifyWidget::new(
@@ -60,16 +62,16 @@ impl Ui {
                             Ok(tile) => {
                                 tiles_container.pack_start(&tile.container, false, false, 0);
                                 tiles_container.show_all();
+                                win.show_all();
                                 spawned_ids.insert(n.id);
                                 active_tiles.insert(n.id, tile);
                             }
                             Err(e) => eprintln!("failed to create notify widget: {e:#}"),
                         }
-                        window_rc.resize(300, -1);
-                        window_rc.queue_resize();
                     }
                     Event::Close(id) => {
                         if let Some(tile) = active_tiles.remove(id) {
+                            win.show_all();
                             tile.dismissed.set(true);
                             tile.container.hide();
                             tiles_container.remove(&tile.container);
