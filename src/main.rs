@@ -1,17 +1,22 @@
-use std::cell::RefCell;
+mod lib;
+mod ui;
+mod widgets;
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use gtk::prelude::*;
-use gtk::{CssProvider, StyleContext, Application, ApplicationWindow, glib, gdk};
-use ui::Ui;
-use lib::parcer::{modified_time, Parser};
-use crate::lib::notification_server;
+use gtk::{gdk, glib, Application, ApplicationWindow, CssProvider, StyleContext};
 
-mod lib;
-mod ui;
-mod widgets;
+use crate::lib::notification_server::{self, Event, Notification};
+use lib::parcer::{modified_time, Parser};
+use ui::{ui_calendar::UiCalendar,ui_notification::UiNotification};
+
+
+
 
 struct StyleWatcher {
     provider: CssProvider,
@@ -75,32 +80,50 @@ impl StyleWatcher {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct NotificationStore {
-    pub store: Rc<RefCell<Vec<notification_server::Event>>>,
+    pub events: Rc<RefCell<Vec<Event>>>,
+    pub items: Rc<RefCell<HashMap<u32, Notification>>>,
+    pub popup_open_count: Rc<Cell<u64>>,
 }
 
 impl NotificationStore {
     pub fn new() -> Self {
-        Self {
-            store: Rc::new(RefCell::new(Vec::new())),
-        }
+        Self::default()
     }
 
-    pub fn add(&self, ev: notification_server::Event) {
-        self.store.borrow_mut().push(ev);
+    pub fn add(&self, ev: Event) {
+        match &ev {
+            Event::Notify(n) => {
+                self.items.borrow_mut().insert(n.id, n.clone());
+            }
+            Event::Close(id) => {
+                self.items.borrow_mut().remove(id);
+            }
+        }
+        self.events.borrow_mut().push(ev);
+    }
+
+    pub fn notify_popup_opened(&self) {
+        let next = self.popup_open_count.get().wrapping_add(1);
+        self.popup_open_count.set(next);
     }
 }
-
 fn main() -> Result<(), anyhow::Error> {
     let note = NotificationStore::new();
+    let popup_window: Rc<RefCell<Option<ApplicationWindow>>> = Rc::new(RefCell::new(None));
+    let monitors_initialized = Rc::new(RefCell::new(false));
 
     let app = Application::builder()
         .application_id("ru.bst.Barricade.notifications")
+        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
     let note_startup = note.clone();
-    app.connect_startup(move |_| {
+    app.connect_startup(move |app| {
+        // Не даём приложению завершиться при закрытии попапа или переподключении мониторов
+        app.hold();
+
         let watcher = Rc::new(RefCell::new(StyleWatcher::new()));
         glib::timeout_add_local(Duration::from_millis(500), move || {
             watcher.borrow_mut().tick();
@@ -122,22 +145,32 @@ fn main() -> Result<(), anyhow::Error> {
         }
     });
 
-    let note_activate = note.clone();
-    app.connect_activate(move |app| {
-        let display = gtk::gdk::Display::default().expect("Could not get default display");
-
-        let monitor_count = display.n_monitors();
-        for i in 0..monitor_count {
-            if let Some(monitor) = display.monitor(i) {
-                create_window_for_monitor(app, &monitor, note_activate.clone());
-            }
+    let note_cmd = note.clone();
+    let popup_cmd = popup_window.clone();
+    let monitors_init_cmd = monitors_initialized.clone();
+    app.connect_command_line(move |app, cmd| {
+        // При первом запуске поднимаем окна всплываек для мониторов
+        if !*monitors_init_cmd.borrow() {
+            *monitors_init_cmd.borrow_mut() = true;
+            init_notification_windows(app, note_cmd.clone());
         }
 
-        let app_clone = app.clone();
-        let note_hotplug = note_activate.clone();
-        display.connect_monitor_added(move |_, monitor| {
-            create_window_for_monitor(&app_clone, monitor, note_hotplug.clone());
-        });
+        let switch = match lib::flags::parse(cmd.arguments()) {
+            Ok(s) => s,
+            Err(e) => {
+                if e.use_stderr() {
+                    eprintln!("{e}");
+                    return 1;
+                }
+                println!("{e}");
+                return 0;
+            }
+        };
+
+        if switch {
+            toggle_calendar_popup(app, &popup_cmd, note_cmd.clone());
+        }
+        0
     });
 
     let exit_code = app.run();
@@ -145,7 +178,23 @@ fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-fn create_window_for_monitor(
+fn init_notification_windows(app: &Application, note: NotificationStore) {
+    let display = gdk::Display::default().expect("Could not get default display");
+
+    for i in 0..display.n_monitors() {
+        if let Some(monitor) = display.monitor(i) {
+            create_notification_window(app, &monitor, note.clone());
+        }
+    }
+
+    let app_clone = app.clone();
+    let note_hotplug = note.clone();
+    display.connect_monitor_added(move |_, monitor| {
+        create_notification_window(&app_clone, monitor, note_hotplug.clone());
+    });
+}
+
+fn create_notification_window(
     app: &Application,
     monitor: &gdk::Monitor,
     note: NotificationStore,
@@ -158,7 +207,46 @@ fn create_window_for_monitor(
     gtk_layer_shell::set_monitor(&win, monitor);
     gtk_layer_shell::set_layer(&win, gtk_layer_shell::Layer::Overlay);
     gtk_layer_shell::set_anchor(&win, gtk_layer_shell::Edge::Top, true);
-    let _ui = Ui::new(&win, app, note);
 
+    let _ui = UiNotification::new(&win, app, note);
     win.show_all();
+}
+
+fn toggle_calendar_popup(
+    app: &Application,
+    popup_slot: &Rc<RefCell<Option<ApplicationWindow>>>,
+    note: NotificationStore,
+) {
+    if let Some(win) = popup_slot.borrow().clone() {
+        win.close();
+        return;
+    }
+
+    let win = ApplicationWindow::builder()
+        .application(app)
+        .decorated(false)
+        .build();
+
+    win.set_app_paintable(true);
+    if let Some(visual) = gdk::Screen::default().and_then(|s| s.rgba_visual()) {
+        win.set_visual(Some(&visual));
+    }
+
+    gtk_layer_shell::init_for_window(&win);
+    gtk_layer_shell::set_layer(&win, gtk_layer_shell::Layer::Overlay);
+    gtk_layer_shell::set_anchor(&win, gtk_layer_shell::Edge::Top, true);
+    gtk_layer_shell::set_margin(&win, gtk_layer_shell::Edge::Top, 10);
+    gtk_layer_shell::set_keyboard_interactivity(&win, true);
+
+    let slot_on_destroy = popup_slot.clone();
+    win.connect_destroy(move |_| {
+        *slot_on_destroy.borrow_mut() = None;
+    });
+
+    if let Err(e) = UiCalendar::new(&win, app, note) {
+        eprintln!("failed to create calendar ui: {e:#}");
+        return;
+    }
+
+    *popup_slot.borrow_mut() = Some(win);
 }
