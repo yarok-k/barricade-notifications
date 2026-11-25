@@ -10,16 +10,16 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        barricade-wallpaper = pkgs.callPackage ./default.nix { };
-        default = barricade-wallpaper;
+        barricade-notifications = pkgs.callPackage ./default.nix { };
+        default = barricade-notifications;
       });
 
       apps = forAllSystems (pkgs: rec {
-        barricade-wallpaper = {
+        barricade-notifications = {
           type = "app";
           program = nixpkgs.lib.getExe self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         };
-        default = barricade-wallpaper;
+        default = barricade-notifications;
       });
 
       devShells = forAllSystems (pkgs: {
@@ -27,12 +27,12 @@
       });
 
       overlays.default = final: _prev: {
-        barricade-bar = final.callPackage ./default.nix { };
+        barricade-notifications = final.callPackage ./default.nix { };
       };
 
       nixosModules = {
         barricade-bar = ./module.nix;
-        default = self.nixosModules.barricade-wallpaper;
+        default = self.nixosModules.barricade-notifications;
       };
     };
 }

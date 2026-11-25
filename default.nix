@@ -8,7 +8,7 @@
 }:
 
 rustPlatform.buildRustPackage {
-  pname = "barricade-wallpaper";
+  pname = "barricade-notifications";
   version = (lib.importTOML ./Cargo.toml).package.version;
 
   src = lib.fileset.toSource {
@@ -46,10 +46,10 @@ rustPlatform.buildRustPackage {
   '';
 
   meta = {
-    description = "обои для тайлинг композиторов на GTK3";
-    homepage = "https://github.com/yarok-k/barricade-wallpaper";
-    license = lib.licenses.gpl3Plus;
-    mainProgram = "barricade-wallpaper";
+    description = "календарь и менеджер уведомлений на gtk3";
+    homepage = "https://github.com/yarok-k/barricade-notifications";
+    license = lib.licenses.mit;
+    mainProgram = "barricade-notifications";
     platforms = lib.platforms.linux;
   };
 }
